@@ -1,0 +1,120 @@
+pipeline {
+    agent any
+
+    tools {
+        maven 'Apache Maven 3.9.3'
+        jdk 'OpenJDK-21'
+    }
+
+    environment {
+        APP_NAME       = 'inventory'
+        CONTEXT_PATH   = '/inventory'
+        WAR_FILE       = 'target/inventory.war'
+
+        TOMCAT_URL     = 'http://localhost:8081'
+        TOMCAT_CRED_ID = 'tomcat-cred'
+
+        SONAR_HOST_URL = 'http://localhost:9000'
+        SONAR_CRED_ID  = 'sonar-token'
+        SONAR_KEY      = 'ims-inventory'
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Build') {
+            steps {
+                bat 'mvn clean package -DskipTests'
+            }
+        }
+
+        stage('Unit Tests') {
+            steps {
+                bat 'mvn test'
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                withCredentials([string(
+                    credentialsId: "${SONAR_CRED_ID}",
+                    variable: 'SONAR_TOKEN'
+                )]) {
+
+                    bat """
+                    mvn sonar:sonar ^
+                    -Dsonar.host.url=%SONAR_HOST_URL% ^
+                    -Dsonar.login=%SONAR_TOKEN% ^
+                    -Dsonar.projectKey=%SONAR_KEY% ^
+                    -Dsonar.projectName=InventoryManagementSystem
+                    """
+                }
+            }
+        }
+
+        stage('Check Tomcat') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: "${TOMCAT_CRED_ID}",
+                    usernameVariable: 'TOMCAT_USER',
+                    passwordVariable: 'TOMCAT_PASS'
+                )]) {
+
+                    bat '''
+                    curl --fail --show-error ^
+                    -u %TOMCAT_USER%:%TOMCAT_PASS% ^
+                    "%TOMCAT_URL%/manager/text/list"
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy to Tomcat') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: "${TOMCAT_CRED_ID}",
+                    usernameVariable: 'TOMCAT_USER',
+                    passwordVariable: 'TOMCAT_PASS'
+                )]) {
+
+                    bat '''
+                    curl --fail --show-error ^
+                    --upload-file "%WAR_FILE%" ^
+                    -u %TOMCAT_USER%:%TOMCAT_PASS% ^
+                    "%TOMCAT_URL%/manager/text/deploy?path=%CONTEXT_PATH%&update=true"
+                    '''
+                }
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                bat '''
+                curl --fail --show-error --max-time 30 ^
+                "%TOMCAT_URL%/inventory/health"
+
+                if %ERRORLEVEL% NEQ 0 (
+                    echo "HEALTH CHECK FAILED"
+                    exit /b 1
+                )
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Inventory deployed successfully"
+            echo "URL: http://localhost:8081/inventory/health"
+        }
+
+        failure {
+            echo "Pipeline FAILED - check logs"
+        }
+    }
+}
